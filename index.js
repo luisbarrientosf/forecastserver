@@ -19,78 +19,72 @@ const client = redis.createClient(env.REDIS_URL);
 //SOCKET
 io.on("connection", socket => { 
   socket.on("get_data", () => {
-    client.hgetall("forecasts", (err, obj) => io.sockets.emit("get_forecast_data", obj) );
+    client.hgetall("forecasts", (err, obj) => io.sockets.emit("update_completed", obj) );
   });
-});
 
-//REQUESTS
-//Save cities coordintates from Frontend on Redis.
-app.get("/init", (req, res, next) => {
-  try {
-    //Simulate 10% Error
-    if (Math.random(0, 1) < 0.1) throw new Error('How unfortunate! The API Request Failed');
-   
-    //Save latitude and longitude of each city on Redis
-    const cities = req.query.cities.map((city, index) =>  JSON.parse(city));
-    for (var i = 0; i < cities.length; i++) {
-      client.set(`${cities[i].name}.coords`, `${cities[i].lat},${cities[i].lng}`, redis.print);
-    }
+  socket.on("update", (city) => {
+    try {
+      //Simulate 10% Error
+      if (Math.random(0, 1) < 0.1) throw new Error('How unfortunate! The API Request Failed');
 
-    res.send(cities);
-  } catch (error) {
-    var infoError = {
-      requestUrl: "/init",
-      requestQuery: req.query
-    }
-    processError(error, infoError);
-    next(error);
-  }
-});
+      //Get latitude and longitude from Redis
+      client.get(`${city}.coords`, (err, result) => {
+        const url = `https://api.darksky.net/forecast/${env.DARKSKY_API_KEY}/${result}`;
+        
+        //Request to Forecast API
+        https.get( url, (resp) => {
+          let data = '';
+          resp.on('data', (chunk) => data += chunk);
 
-//Update the forecast and time on Redis
-app.get("/forecast", async (req, res, next) => {
-  try {
-    //Simulate 10% Error
-    if (Math.random(0, 1) < 0.1) throw new Error('How unfortunate! The API Request Failed');
+          resp.on('end', () => {
+            const { latitude, longitude, currently, error } = JSON.parse(data);
 
-    //Get latitude and longitude from Redis
-    client.get(`${req.query.city}.coords`, (err, result) => {
-      const url = `https://api.darksky.net/forecast/${env.DARKSKY_API_KEY}/${result}`;
-      
-      //Request to Forecast API
-      https.get( url, (resp) => {
-        let data = '';
-        resp.on('data', (chunk) => data += chunk);
+            if(error){
+              //daily usage limit exceeded or maybe another
+              throw new Error('Request to Forecast API Failed')
+            }
 
-        resp.on('end', () => {
-          const { latitude, longitude, currently, error } = JSON.parse(data);
+            if(currently !== undefined){
+              //Save forecast data on redis
+              client.hmset("forecasts", `${latitude},${longitude}`, JSON.stringify(currently), () => {
+                client.hgetall("forecasts", (err, obj) => io.sockets.emit("update_completed", obj) );
+              });
+            }
+          });
 
-          if(error){
-            //daily usage limit exceeded or maybe another
-            throw new Error('Request to Forecast API Failed')
-          }
-
-          if(currently !== undefined){
-            //Save forecast data on redis
-            client.hmset("forecasts", `${latitude},${longitude}`, JSON.stringify(currently), () => {
-              client.hgetall("forecasts", (err, obj) => io.sockets.emit("get_forecast_data", obj) );
-            });
-          }
-          res.send({ currently });
+        }).on("error", (err) => {
+          throw new Error('Request to Forecast API Failed')
         });
-
-      }).on("error", (err) => {
-        throw new Error('Request to Forecast API Failed')
       });
-    });
-  } catch (error) {
-    var infoError = {
-      requestUrl: "/forecast",
-      requestQuery: req.query
+    } catch (error) {
+      io.sockets.emit("update_error", city);
+      var infoError = {
+        socketFunction: "update",
+        city: city
+      }
+      processError(error, infoError);
     }
-    processError(error, infoError);
-    next(error);
-  }
+  }); 
+
+  socket.on('init', (city) => {
+    try {
+      //Simulate 10% Error
+      if (Math.random(0, 1) < 0.1) throw new Error('How unfortunate! The API Request Failed');
+
+      //Save latitude and longitude of each city on Redis
+      let { name, lat, lng } = city;
+      client.set(`${name}.coords`, `${lat},${lng}`, () => io.sockets.emit("init_completed", city));
+      
+    } catch (error) {
+      io.sockets.emit("init_error", city);
+      var infoError = {
+        socketFunction: "init",
+        city: city
+      }
+      processError(error, infoError);
+    }
+  });
+
 });
 
 const processError = (error, data) => {
